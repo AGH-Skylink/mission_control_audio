@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+sounddevice
+numpy
+pydantic
+loguru
+psutil
