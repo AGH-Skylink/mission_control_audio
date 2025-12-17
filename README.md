@@ -1,41 +1,31 @@
 Mission Control Audio Engine (Python)
 
 Audio I/O + DSP service for Mission Control.
-Opens 4 duplex streams (44.1 kHz / 16-bit / stereo), processes each through a Compressor → Limiter chain, and exposes a control/monitoring API:
+The engine opens 4 duplex audio streams (44.1 kHz / 16-bit / stereo), processes each channel through a Compressor → Limiter DSP chain, and exposes monitoring and control via a small HTTP API.
 
-GET /status
+Features
 
-GET /vu
+4 logical audio channels mapped to physical input/output devices
 
-POST /config
+Real-time DSP per channel:
 
-POST /ptt
+Compressor (2:1 ratio, −20 dBFS threshold, 10 ms attack / 100 ms release)
 
-GET /self-check
+Limiter (−3 dBFS ceiling)
 
-Designed for low-latency, fault-tolerant audio operations with external UI integration.
+Stable VU meters @ ~10 Hz (RMS → dBFS, −60 dBFS floor)
 
- Features
+JSON status reporting (xruns, CPU usage, uptime)
 
-4 logical audio channels, each mapped to physical input/output devices
+Hot-reloadable configuration with validation
 
-Real-time DSP chain per channel:
+Proper API error handling (HTTP 400 / 500)
 
-Compressor (2:1 ratio, −20 dB threshold, 10/100 ms attack/release)
+DSP sanity self-checks
 
-Limiter (−3 dB ceiling)
+CI workflow for syntax safety
 
-VU meters @10 Hz (RMS → dBFS with −60 dBFS floor)
-
-Engine status reporting: xruns, CPU usage, uptime
-
-Hot-reloadable config.json with validation
-
-Fully instrumented API with proper HTTP error handling
-
-CI workflow (syntax checks) via GitHub Actions
-
- Quick start
+Quick Start
 python -m venv .venv
 # Windows:
 .venv\Scripts\activate
@@ -44,59 +34,32 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 
-cp config.example.json config.json     # edit device IDs for your system
-python main.py devices                 # list available input/output hardware
-python main.py run                     # start the engine + API (http://localhost:8000)
+cp config.example.json config.json
+python main.py devices
+python main.py run    # API at http://localhost:8000
 
-# test: play a 1 kHz tone for 5 seconds on channel 1
+
+Test audio path (1 kHz tone):
+
 python main.py test-tone --channel 1 --seconds 5
 
- HTTP API
-GET /status
+HTTP API
+Method	Endpoint	Description
+GET	/status	Engine state, device map, xruns, CPU, uptime
+GET	/vu	Current VU levels (dBFS)
+GET	/self-check	DSP compressor & limiter sanity check
+POST	/config	Hot-reload validated configuration
+POST	/ptt	{ channel, mute, gate_open }
+🛠 Configuration (config.json)
 
-Returns:
+Device IDs must match your local machine.
 
-sample rate, blocksize
-
-logical→physical device map
-
-xruns per channel
-
-CPU usage
-
-uptime
-
-GET /vu
-
-Returns current VU levels in dBFS with −60 dBFS floor.
-
-POST /config
-
-Hot-reloads configuration.
-Rejects invalid configs with correct 400 / 500 responses.
-
-POST /ptt
-
-Controls per-channel mute/gate:
-
-{ "channel": 1, "mute": false, "gate_open": true }
-
-GET /self-check
-
-Internal DSP test:
-
-compressor RMS validation
-
-limiter peak ceiling check
-
- Config schema (config.json)
-
- You must update real device IDs using:
+List devices using:
 
 python main.py devices
 
 
-Example (valid for one local setup):
+Example (local Windows test):
 
 {
   "sample_rate": 44100,
@@ -105,10 +68,10 @@ Example (valid for one local setup):
   "blocksize": 512,
 
   "logical_channels": {
-    "1": {"input_device_id": 1, "output_device_id": 3},
-    "2": {"input_device_id": 1, "output_device_id": 3},
-    "3": {"input_device_id": 1, "output_device_id": 3},
-    "4": {"input_device_id": 1, "output_device_id": 3}
+    "1": { "input_device_id": 1, "output_device_id": 3 },
+    "2": { "input_device_id": 1, "output_device_id": 3 },
+    "3": { "input_device_id": 1, "output_device_id": 3 },
+    "4": { "input_device_id": 1, "output_device_id": 3 }
   },
 
   "dsp": {
@@ -125,122 +88,197 @@ Example (valid for one local setup):
   }
 }
 
-Repository layout
+Repository Layout
 mission_control_audio/
-├─ main.py               # CLI runner + engine launcher
+├─ main.py               # CLI + engine launcher
 ├─ api.py                # FastAPI HTTP interface
 ├─ requirements.txt
 ├─ README.md
 ├─ config.example.json
-├─ .github/
-│   └─ workflows/ci.yml  # Syntax CI
+├─ .github/workflows/
+│  └─ ci.yml             # CI: syntax checks
 └─ audio_engine/
-    ├─ __init__.py
-    ├─ audio_device.py   # Device enumeration
-    ├─ dsp.py            # Compressor + Limiter implementation
-    ├─ engine.py         # Core audio engine + validation
-    └─ vu.py             # RMS → dBFS computation
+   ├─ audio_device.py    # Device enumeration
+   ├─ dsp.py             # Compressor & limiter
+   ├─ engine.py          # Core engine + validation
+   └─ vu.py              # RMS → dBFS calculation
 
-⭐ My Contributions (Jun / minoverse) — STAR Summary
-Situation
+My Work — Problems Faced & Solved (STAR Style)
 
-When I joined, the audio engine lacked error handling, proper configuration validation, stable VU metering, DSP testing, and CI support.
-Local audio was not functioning due to invalid device IDs and missing validation logic.
+This section documents the concrete engineering problems I encountered and how I solved them.
 
-Task
+1️⃣ API Error Handling Improvements (api.py)
+Problem
 
-I needed to:
+The API always returned:
 
-Implement robust API error handling
+{"ok": true}
 
-Validate all configuration inputs before applying
 
-Fix VU metering to 10 Hz with correct dBFS floor
+even when requests failed. No HTTP status codes were used, making failures hard to detect.
 
-Add DSP sanity checks for compressor & limiter
+Solution
 
-Make the engine run on local hardware
+Replaced all {"ok": true} responses with:
 
-Add CI workflow
+{"status": "ok"}
 
-Document everything clearly
 
-Action
+Added proper HTTPException handling:
 
-I delivered the following improvements:
+400 → invalid config, unknown channel
 
-🔧 API Hardening
+500 → internal engine errors
 
-Replaced "ok": true with proper structured responses
+Added strict error handling for:
 
-Added HTTPException handling
+/config
 
-Implemented correct 400 vs. 500 failures
+/ptt
 
-Secured /config, /ptt, /status, and /self-check
-
-🔍 Full Configuration Validation
-
-Verified device IDs exist (sd.query_devices)
-
-Checked sample rate, blocksize, sample format, channel count
-
-Ensured devices support requested audio format
-
-Prevented partial/invalid configs from being applied
-
-🎚 Stable VU Meter
-
-Implemented 100 ms RMS window → 10 Hz refresh
-
-Applied −60 dBFS floor
-
-Ensured stable, noise-free output
-
-🎛 DSP Self-Check
-
-Added offline test in /self-check
-
-Compressor: expected −16 dBFS vs actual RMS
-
-Limiter: peak ceiling ≤ −3 dBFS
-
-Improved tolerance and reporting
-
-🔌 Local Audio Debugging
-
-Enumerated real devices on my machine
-
-Fixed wrong config IDs
-
-Mapped mic (1) → speakers (3)
-
-Tested loopback, VU, status, test-tone generator
-
-Solved initial crash from missing or invalid config.json
-
-⚙️ CI Setup
-
-Added .github/workflows/ci.yml
-
-Performs syntax check (python -m compileall .) on every push
+/self-check
 
 Result
 
-Engine now runs stably on local hardware
+The API is now predictable, debuggable, and follows REST semantics.
 
-API fully compliant with project requirements
+2️⃣ Full Configuration Validation (audio_engine/engine.py)
+Problem
 
-DSP processing validated
+Invalid configs were accepted.
 
-VU metering correct and stable
+Wrong device IDs caused runtime crashes.
 
-Configuration safe and validated
+Unsupported sample rates or channel counts broke the engine.
 
-CI prevents regressions
+Solution
 
-System ready for integration with UI/backend team
+Implemented validate_config() which verifies:
 
-📄 License
+sample_rate > 0
+
+blocksize > 0
+
+channels ∈ {1, 2}
+
+sample_format == "int16"
+
+Exactly 4 logical channels are defined
+
+Each input_device_id / output_device_id:
+
+Exists (sd.query_devices)
+
+Supports requested sample rate & channels
+(sd.check_input_settings, sd.check_output_settings)
+
+Result
+
+Invalid configs are rejected before touching the running engine.
+No partial restarts, no silent failures.
+
+3️⃣ VU Meter Stabilization (10 Hz, −60 dBFS Floor)
+Problem
+
+VU readings were unstable and sometimes dropped below the required −60 dBFS floor.
+
+Solution
+
+Used RMS over a 100 ms window → ~10 Hz update rate
+
+Applied strict −60 dBFS floor
+
+Normalized values correctly to dBFS
+
+Result
+
+VU output is stable, readable, and meets the specification.
+
+Example:
+
+{"1": -60.0, "2": -60.0, "3": -60.0, "4": -60.0}
+
+4️⃣ DSP Sanity Checks (Compressor & Limiter)
+Problem
+
+There was no automated way to verify DSP correctness.
+
+Solution
+
+Implemented engine.self_check_dsp():
+
+Compressor
+
+Input: −12 dBFS sine
+
+Expected output: ~−16 dBFS (2:1 above −20 dBFS)
+
+±2–3 dB tolerance
+
+Limiter
+
+Input: 0 dBFS sine
+
+Verified peak ≤ −3 dBFS
+
+Result
+
+DSP behavior can be verified programmatically without external hardware.
+
+5️⃣ Local Audio Pipeline Testing
+Problem
+
+Local testing failed due to invalid configs and incorrect device IDs.
+
+Solution
+
+Enumerated devices with python main.py devices
+
+Selected valid hardware:
+
+Input: device 1 (Microphone Array)
+
+Output: device 3 (Realtek Speakers)
+
+Updated config.json
+
+Verified:
+
+/status
+
+/vu
+
+/self-check
+
+Real-time loopback
+
+Test-tone playback
+
+Result
+
+The engine runs correctly on local hardware.
+
+6️⃣ GitHub CI (Syntax & Safety Checks)
+Problem
+
+No automated checks → easy to break the main branch.
+
+Solution
+
+Added .github/workflows/ci.yml:
+
+Python 3.10
+
+Installs safe dependencies
+
+Runs:
+
+python -m compileall .
+
+Result
+
+Syntax errors are caught automatically on every push and pull request.
+
+📄License
 
 MIT — see LICENSE.
