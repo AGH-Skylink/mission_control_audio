@@ -1,10 +1,20 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
 
 def create_app(engine):
     app = FastAPI(title="Mission Control Audio Engine API")
+
+    # Allow browser-based UI (Vite) to call this API + WebSocket
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     class ConfigModel(BaseModel):
         sample_rate: int
@@ -27,6 +37,23 @@ def create_app(engine):
     def vu():
         return engine.get_vu_levels()
 
+    # --- UI compatibility endpoints ---
+    @app.get("/health")
+    def health():
+        return {"status": "ok"}
+
+    @app.get("/state")
+    def state():
+        return engine.get_status()
+
+    @app.websocket("/ws/vu")
+    async def ws_vu(ws: WebSocket):
+        await ws.accept()
+        import asyncio
+        while True:
+            await ws.send_json(engine.get_vu_levels())
+            await asyncio.sleep(0.1)
+
     @app.get("/self-check")
     def self_check():
         try:
@@ -45,7 +72,7 @@ def create_app(engine):
         except AttributeError:
             cfgdict = cfg.model_dump()
 
-        # 1) validate first (no side effects)
+        # validate first (no side effects)
         try:
             engine.validate_config(cfgdict)
         except ValueError as ve:
@@ -53,7 +80,7 @@ def create_app(engine):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"validation error: {e}")
 
-        # 2) apply config
+        # apply config
         try:
             engine.reload_config(cfgdict)
         except Exception as e:
