@@ -5,7 +5,7 @@ import threading
 import time
 from pathlib import Path
 
-from loguru import logger
+from core.logger import monitor
 
 from audio_engine.engine import AudioEngine
 from api import create_app, run_api
@@ -28,27 +28,36 @@ def cmd_test_tone(args):
     cfg = load_config(Path(args.config))
     eng = AudioEngine(cfg)
     eng.start()
-    logger.info(f"Playing 1 kHz test tone on logical channel {args.channel} for {args.seconds}s")
+    monitor.log_event(f"Playing 1 kHz test tone on logical channel {args.channel} for {args.seconds}s")
     eng.play_test_tone(args.channel, duration=args.seconds)
     eng.stop()
 
 
 def cmd_run(args):
-    cfg = load_config(Path(args.config))
+    cfg = None
+    try:
+        with open(args.config, "r") as f:
+            cfg = json.load(f)
+    except Exception as e:
+        monitor.log_error("AUDIO_CONFIG_FAIL", e)
+        return
+
     eng = AudioEngine(cfg)
     eng.start()
-    logger.info("Audio engine started")
 
-    # Run API in a thread, sharing engine instance via app state
+    monitor.log_event("AUDIO_SERVICE_STARTING",
+                      {"host": args.host, "port": args.port, "config": args.config},
+                      message="Initializing Mission Control Audio Engine Service")
+
     app = create_app(eng)
     api_thread = threading.Thread(target=run_api, args=(app, args.host, args.port), daemon=True)
     api_thread.start()
-    logger.info(f"HTTP API running at http://{args.host}:{args.port}")
+
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        logger.info("Shutting down...")
+        monitor.log_event("AUDIO_ENGINE_SHUTDOWN")
     finally:
         eng.stop()
 
@@ -64,7 +73,7 @@ def main():
 
     p_run = sub.add_parser("run", help="Run audio engine + HTTP API")
     p_run.add_argument("--host", default="0.0.0.0")
-    p_run.add_argument("--port", type=int, default=8000)
+    p_run.add_argument("--port", type=int, default=8002)
     p_run.set_defaults(func=cmd_run)
 
     p_tone = sub.add_parser("test-tone", help="Play 1 kHz test tone on a channel")

@@ -1,7 +1,5 @@
-
 import numpy as np
 import time
-
 
 class VUMeter:
     """Keeps windowed RMS and emits dBFS at ~10 Hz."""

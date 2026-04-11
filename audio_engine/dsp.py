@@ -1,9 +1,8 @@
-
 import numpy as np
 
 
 class Compressor:
-    def __init__(self, ratio=2.0, threshold_db=-20.0, attack_ms=10.0, release_ms=100.0, fs=44100):
+    def __init__(self, ratio=2.0, threshold_db=-25.0, attack_ms=10.0, release_ms=100.0, fs=44100):
         self.ratio = ratio
         self.threshold = 10 ** (threshold_db / 20.0)
         self.alpha_a = np.exp(-1.0 / (attack_ms * 0.001 * fs))
@@ -11,22 +10,21 @@ class Compressor:
         self.env = 0.0
 
     def process(self, x: np.ndarray) -> np.ndarray:
-        # x: float32 [-1,1], shape (frames, channels)
-        x_mono = np.mean(np.abs(x), axis=1)
-        y = np.empty_like(x)
-        for i, s in enumerate(x_mono):
-            # envelope follower
-            if s > self.env:
-                self.env = self.alpha_a * self.env + (1 - self.alpha_a) * s
-            else:
-                self.env = self.alpha_r * self.env + (1 - self.alpha_r) * s
-            gain = 1.0
-            if self.env > self.threshold:
-                over = self.env / self.threshold
-                target = over ** (1.0 - 1.0 / self.ratio)
-                gain = 1.0 / max(target, 1e-6)
-            y[i] = x[i] * gain
-        return y
+        x_abs = np.mean(np.abs(x), axis=1)
+        current_max = np.max(x_abs)
+
+        if current_max > self.env:
+            self.env = self.alpha_a * self.env + (1 - self.alpha_a) * current_max
+        else:
+            self.env = self.alpha_r * self.env + (1 - self.alpha_r) * current_max
+
+        gain = 1.0
+        if self.env > self.threshold:
+            over = self.env / self.threshold
+            target = over ** (1.0 - 1.0 / self.ratio)
+            gain = 1.0 / max(target, 1e-6)
+
+        return x * gain
 
 
 class Limiter:
@@ -43,7 +41,7 @@ class DSPChain:
         l = cfg.get("limiter", {})
         self.comp = Compressor(
             ratio=c.get("ratio", 2.0),
-            threshold_db=c.get("threshold_db", -20.0),
+            threshold_db=c.get("threshold_db", -25.0),
             attack_ms=c.get("attack_ms", 10.0),
             release_ms=c.get("release_ms", 100.0),
             fs=fs,
