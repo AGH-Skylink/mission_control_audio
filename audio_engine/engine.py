@@ -1,8 +1,7 @@
-# ──────────────────────────────────────────────────────────────────────────────
-# File: audio_engine/engine.py
-# ──────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
+from .dsp import DSPChain
+from .vu import VUMeter
 import math
 import threading
 import time
@@ -11,10 +10,9 @@ from dataclasses import dataclass
 import numpy as np
 import psutil
 import sounddevice as sd
-from loguru import logger
 
-from .dsp import DSPChain
-from .vu import VUMeter
+from multiprocessing import shared_memory
+from core.logger import monitor
 
 
 @dataclass
@@ -55,7 +53,7 @@ def _check_stream_settings(dev_id: int, samplerate: int, channels: int, is_input
 
 
 class AudioChannel:
-    def __init__(self, chan_id: int, cfg: ChannelConfig, fs: int, blocksize: int, dsp_cfg: dict):
+    def __init__(self, chan_id: int, cfg: ChannelConfig, fs: int, blocksize: int, dsp_cfg: dict, shm_name: str = None):
         self.chan_id = chan_id
         self.fs = fs
         self.blocksize = blocksize
@@ -64,7 +62,20 @@ class AudioChannel:
         self.gate_open = True
         self.xruns = 0
 
-        # ~10 Hz VU with floor -60 dBFS (handled inside VUMeter)
+        self.shm_name = shm_name
+        self.shm = None
+        self.shm_array = None
+
+        if self.shm_name:
+            try:
+                self.shm = shared_memory.SharedMemory(name=self.shm_name)
+                self.shm_array = np.ndarray((3, blocksize), dtype=np.float32, buffer=self.shm.buf)
+                monitor.log_event("AUDIO_SHM_LINKED", {"channel": chan_id, "shm": shm_name})
+            except FileNotFoundError:
+                monitor.log_event("AUDIO_SHM_MISSING", {"channel": chan_id}, level="WARNING")
+
+        from .vu import VUMeter
+        from .dsp import DSPChain
         self.vu = VUMeter(window_s=0.1, fs=fs)
         self.dsp = DSPChain(dsp_cfg, fs)
 
@@ -78,37 +89,53 @@ class AudioChannel:
         )
 
     def _callback(self, indata, outdata, frames, time_info, status):
-        # xrun tracking
-        if (
-            status.input_underflow
-            or status.input_overflow
-            or status.output_underflow
-            or status.output_overflow
-        ):
-            self.xruns += 1
+        with monitor.time_operation(f"AUDIO_CALLBACK_CH_{self.chan_id}", level="DEBUG"):
+            if status:
+                event_data = {
+                    "ch": self.chan_id,
+                    "underflow": status.input_underflow or status.output_underflow,
+                    "overflow": status.input_overflow or status.output_overflow,
+                    "primed": status.priming_output
+                }
+                monitor.log_event("AUDIO_HARDWARE_XRUN", event_data, level="WARNING",
+                                  message=f"Hardware sync issue on CH {self.chan_id}")
+                self.xruns += 1
 
-        # int16 -> float32 [-1, 1]
-        x = indata.astype(np.float32) / 32768.0
+            x = indata.astype(np.float32) / 32768.0
 
-        # loopback through DSP
-        y = x
-        if self.gate_open:
-            y = self.dsp.process(y)
-        if self.mute:
-            y = np.zeros_like(y)
+            y = x
+            if self.gate_open:
+                y = self.dsp.process(y)
+            if self.mute:
+                y = np.zeros_like(y)
 
-        # update VU
-        self.vu.update(y)
+            if self.shm_array is not None:
+                y_mono = np.mean(y, axis=1)
+                self.shm_array[0, :] = y_mono
+            else:
+                if getattr(self, '_retry_count', 0) > 100:
+                    try:
+                        from multiprocessing import shared_memory
+                        self.shm = shared_memory.SharedMemory(name=self.shm_name)
+                        self.shm_array = np.ndarray((3, self.blocksize), dtype=np.float32, buffer=self.shm.buf)
+                        monitor.log_event("AUDIO_SHM_RECONNECTED", {"channel": self.chan_id})
+                        self._retry_count = 0
+                    except FileNotFoundError:
+                        self._retry_count = 0
+                else:
+                    self._retry_count = getattr(self, '_retry_count', 0) + 1
 
-        # float32 -> int16
-        outdata[:] = np.clip(y * 32767.0, -32768, 32767).astype(np.int16)
+            self.vu.update(y)
+            outdata[:] = np.clip(y * 32767.0, -32768, 32767).astype(np.int16)
 
     def start(self):
         self._stream.start()
+        monitor.log_event("CHANNEL_STARTED", {"id": self.chan_id})
 
     def stop(self):
         self._stream.stop()
-        self._stream.close()
+        if self.shm:
+            self.shm.close()
 
 
 class AudioEngine:
@@ -123,12 +150,14 @@ class AudioEngine:
         # build channels from logical_channels
         for k, v in cfg.get("logical_channels", {}).items():
             ch_id = int(k)
+            shm_name = f"ch_{ch_id - 1}_buf"
             ch = AudioChannel(
                 ch_id,
                 ChannelConfig(v["input_device_id"], v["output_device_id"]),
                 fs=self.fs,
                 blocksize=self.blocksize,
                 dsp_cfg=cfg.get("dsp", {}),
+                shm_name=shm_name
             )
             self.channels[ch_id] = ch
 
@@ -221,6 +250,11 @@ class AudioEngine:
         ch = self.channels.get(channel)
         if not ch:
             raise ValueError(f"unknown channel {channel}")
+
+        monitor.log_event("PTT_STATE_CHANGE",
+                          {"ch": channel, "mute": mute, "gate": gate_open},
+                          message=f"PTT adjusted for hardware channel {channel}")
+
         ch.mute = mute
         ch.gate_open = gate_open
 

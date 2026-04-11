@@ -2,6 +2,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, field_validator
 import uvicorn
 
+from core.logger import monitor
+
 
 def create_app(engine):
     app = FastAPI(title="Mission Control Audio Engine API")
@@ -70,6 +72,8 @@ def create_app(engine):
     def update_config(cfg: ConfigModel):
         cfgdict = cfg.model_dump()
         # 1) validate inputs (no side effects)
+        monitor.log_event("API_CONFIG_UPDATE", cfgdict,
+                          message="Audio Engine reconfiguration initiated via API")
         try:
             engine.validate_config(cfgdict)
         except ValueError as ve:
@@ -88,6 +92,8 @@ def create_app(engine):
     @app.post("/ptt")
     def ptt(ptt: PttModel):
         # check channel exists
+        monitor.log_event("API_PTT_REQUEST", ptt.model_dump(),
+                          message=f"Received PTT command for CH {ptt.channel}")
         if str(ptt.channel) not in engine.channel_keys():
             raise HTTPException(status_code=400, detail=f"unknown channel {ptt.channel}")
         try:
